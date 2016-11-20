@@ -222,6 +222,7 @@ void copyBytes(int numBytes, File *f = &fExe) {
 	}
 }
 
+
 /*--------------------------------------------------------------------------
  * Main functions
  *
@@ -262,8 +263,8 @@ void checkCommandLine(int argc, char *argv[]) {
 /**
  * Validates that the specified file is an RTLink-encoded executable
  */
-const char *RTLinkStr = "RTLink";
-#define RTLINK_STR_SIZE 6
+const char *RTLinkStr = "PLINK86";
+#define RTLINK_STR_SIZE 7
 
 bool validateExecutable() {
 	char mzBuffer[2];
@@ -338,31 +339,18 @@ bool loadJumpList() {
 		return true;
 	}
 
-	if (rtlinkVersion != VERSION2) {
-		// After the filename (which is used by an earlier segment list), there may be 
-		// another ASCII filename for an overlay file, and then after that the thunk list.
-		// So if we get any kind of low value, then something's screwed up
-		fExe.seek(exeNameOffset);
-		callByte = 0xE8;
+	// After the filename (which is used by an earlier segment list), there may be 
+	// another ASCII filename for an overlay file, and then after that the thunk list.
+	// So if we get any kind of low value, then something's screwed up
+	fExe.seek(exeNameOffset);
+	callByte = 0x9A;
 
-		// Scan forward to following start of thunk methods
-		while ((byteVal = fExe.readByte()) != callByte) {
-			if (byteVal > 0 && byteVal < 32) {
-				printf("Couldn't resolve jump list\n");
-				return false;
-			}
-		}
-	} else {
-		const char *EnterDirStr = "Enter directory for $";
-		int fileOffset = scanExecutable((const byte *)EnterDirStr, strlen(EnterDirStr));
-		if (fileOffset == -1) {
+	// Scan forward to following start of thunk methods
+	while ((byteVal = fExe.readByte()) != callByte) {
+		if (byteVal > 0 && byteVal < 32) {
 			printf("Couldn't resolve jump list\n");
 			return false;
 		}
-		callByte = 0x9a;
-
-		// Scan forward to following start of thunk methods
-		while (!fExe.eof() && ((byteVal = fExe.readByte()) != 0x9A));
 	}
 
 	jumpOffset = fExe.pos() - 1;
@@ -371,64 +359,29 @@ bool loadJumpList() {
 	while (!fExe.eof() && (byteVal == callByte)) {
 		uint32 fileOffset = fExe.pos() - 1;
 
-		// Skip over the ther operands for the thunk call that loads the dynamic segment
-		fExe.skip((rtlinkVersion == VERSION2) ? 4 : 2);
+		// Skip over the other operands for the thunk call that loads the dynamic segment
+		fExe.skip(4);
 
-		byte jmpByte = fExe.readByte();
-		if (jmpByte != 0xea)
-			// It's not a jmp statement, so reached end of list
-			break;
+		// Segment indices not zero-based, hence the adjustment
+		int segmentIndex = fExe.readWord() - 1;
+
+		// Skip the jump byte
+		fExe.readByte();
 
 		// Skip over offset within dynamic segments to jump to, and get the segment value
 		uint16 offsetInSegment = fExe.readWord();
 		uint16 segment = fExe.readWord();
-		int segmentIndex;
-
-		if (rtlinkVersion == VERSION2) {
-			// In Version 2 games, the jump stubs are intermingled with some
-			// method stubs for methods which reside in the static part of 
-			// the executable and shouldn't need method stubs to begin with.
-			// Hence all the funky tests down below.
-			byteVal = fExe.readByte();
-
-			if ((segment != 0) || (byteVal == 0x9a)) {
-				segmentIndex = -1;
-			} else {
-				// The following bytes are an alias for segment translation
-				segmentIndex = byteVal | (fExe.readByte() << 8);
-				--segmentIndex;
-
-				byteVal = fExe.readByte();
-				byte byteVal2 = fExe.readByte();
-				byte byteVal3 = fExe.readByte();
-
-				if ((byteVal == 0x9a) && (byteVal3 != 0x9a)) {
-					fExe.seek(-2, SEEK_CUR);
-				} else {
-					// Get the offset and byte from following instruction
-					segment = byteVal | (byteVal2 << 8);
-
-					byteVal = byteVal3;
-				}
-			}
-		} else {
-			segmentIndex = fExe.readWord();
-		}
 
 		JumpEntry rec;
 
 		rec.fileOffset = fileOffset;
 		rec.segmentIndex = segmentIndex;
-		rec.segmentOffset = (rtlinkVersion == VERSION2) ? segment : 
-			segment - segmentList[segmentIndex].loadSegment;
+		rec.segmentOffset = segment;
 		rec.offsetInSegment = offsetInSegment;
 		jumpList.push_back(rec);
 
 		// If the next byte is 0, scan forward to see if the list resumes
-		if (rtlinkVersion != VERSION2)
-			byteVal = fExe.readByte();
-		while (byteVal == 0)
-			byteVal = fExe.readByte();
+		while ((byteVal = fExe.readByte()) == 0);
 	}
 
 	jumpSize = fExe.pos() - jumpOffset - 1;
@@ -531,25 +484,30 @@ void updateRelocationEntries() {
 	// different points within the same area of memory allocated for loading them, 
 	// so if we left them in place, we could end up with confusion about how big
 	// each segment is
+	uint count = 0;
 	for (int idx = (int)relocations.size() - 1; idx >= 0; --idx) {
 		RelocationEntry &re = relocations[idx];
 		uint fileOffset = re.fileOffset();
-		if (re.fileOffset() >= segmentsOffset && re.fileOffset() < (segmentsOffset + segmentsSize))
+		if (re.fileOffset() >= segmentsOffset && re.fileOffset() < (segmentsOffset + segmentsSize)) {
 			relocations.remove_at(idx);
-	}
-
-	if (rtlinkVersion == VERSION2) {
-		// Version 2 uses far jumps in the method thunks to call code in loaded methods.
-		// Add in relocation entries for their segment operands
-		for (uint idx = 0; idx < jumpList.size(); ++idx) {
-			int relocIndex = relocations.indexOf(jumpList[idx].fileOffset + 3);
-			if (jumpList[idx].segmentIndex >= 0 && relocIndex != -1) {
-				RelocationEntry &re = relocations[relocIndex];
-				relocations.push_back(RelocationEntry(re.getSegment(), 
-					re.getOffset() + 5));
-			}
+			count++;
 		}
 	}
+
+//	if (rtlinkVersion == VERSION1) {
+//		// Version 1 uses far jumps in the method thunks to call code in loaded methods.
+//		// Add in relocation entries for their segment operands
+//		for (uint idx = 0; idx < jumpList.size(); ++idx) {
+//			int relocIndex = relocations.indexOf(jumpList[idx].fileOffset + 10);
+//			if (jumpList[idx].segmentIndex >= 0 && relocIndex != -1) {
+//				RelocationEntry &re = relocations[relocIndex];
+//				auto segment = re.getSegment();
+//				uint offset = re.getOffset();
+//				relocations.push_back(RelocationEntry(re.getSegment(), 
+//					re.getOffset() + 5));
+//			}
+//		}
+//	}
 
 	// Store a copy of the original number of relocation entries (with already removed entries)
 	originalRelocationCount = relocations.size();
@@ -610,8 +568,10 @@ void updateRelocationEntries() {
 		outputOffset += se.codeSize;
 
 		// Iterate through the dynamic relocation entries for the segment and add them in
+		// Note: PLINK86 overlay files already come with adjusted relocation segments
 		uint baseSegment = (se.outputCodeOffset - outputCodeOffset) >> 4;
 		for (uint idx = 0; idx < se.relocations.size(); ++idx) {
+			// TODO Fix segment address to se.outputCodeOffset
 			relocations.push_back(se.relocations[idx]);
 			relocations[relocations.size() - 1].addSegment(baseSegment);
 		}
@@ -722,7 +682,7 @@ void processExecutable() {
 		} else {
 			// Set up a selector for the method jump which will be relative
 			// to where the segment is located in the output executable
-			SegmentEntry &segEntry = segmentList[je.segmentIndex];
+			SegmentEntry &segEntry = segmentList[je.segmentIndex]; // TODO Fix!
 			newSelector = je.segmentOffset + (segEntry.outputCodeOffset - outputCodeOffset) / 16;
 		}
 
@@ -733,7 +693,11 @@ void processExecutable() {
 		fOut.writeByte(0x90, bytesDiff);
 
 		// Copy over the call to the rtlink load method
-		copyBytes((rtlinkVersion == VERSION2) ? 5 : 3);
+		copyBytes(5);
+
+		// Replace segment number with two NOPs
+		fExe.skip(2);
+		fOut.writeByte(0x90, 2);
 
 		// And the byte for the following FAR JMP instruction
 		copyBytes(1);
@@ -755,6 +719,7 @@ void processExecutable() {
 		SegmentEntry &se = segmentList[segmentNum];
 
 		// Write out the segment's data
+		uint32 pos = fOut.pos();
 		assert(fOut.pos() == se.outputCodeOffset);
 		File *file = se.isExecutable ? &fExe : &fOvl;
 		file->seek(se.codeOffset);
@@ -895,10 +860,10 @@ int main(int argc, char *argv[]) {
 
 	if (infoFlag) {
 		// Informational mode - list the RTLink data
-		listInfo();
 
-	} else {
-		// Processing mode - make a copy of the executable and update it
+    } else {
+        listInfo();
+        // Processing mode - make a copy of the executable and update it
 		if (!fOut.open(outputFilename, kFileWriteMode)) {
 			printf("The specified output file '%s' could not be created", outputFilename);
 			close();
