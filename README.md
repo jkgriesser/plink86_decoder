@@ -1,3 +1,21 @@
+# plink86_decode
+Fork from https://github.com/roguevm/roguevm-tools.
+PLINK86 is a DOS overlay manager used in games such as Wonderland or the Spellcasting series.
+Its purpose is to allow for larger programs by dynamically switching between one or more
+overlay files, containing program code, text and other binary data.
+
+Any given executable linked via PLINK86 contains a header describing attributes such as the
+individual segment's location in the overlay file, the overall segment length and where in
+memory the segment should be loaded.
+Thus far, I have only found single-overlay configurations.
+
+## Work in progress
+* All segments are discovered, retrieved and relocated correctly, but jump table references
+to addresses within each segment still need to be fixed up.
+* Clean-up, removal of RTLink-specific code and renaming of all refernces to RTLink.
+
+See original README.md below.
+
 # roguevm-tools
 RogueVM tools repository
 
